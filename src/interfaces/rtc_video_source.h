@@ -8,11 +8,13 @@
 #pragma once
 
 #include <memory>
+#include <uv.h>
 
 #include <absl/types/optional.h>
 #include <node-addon-api/napi.h>
 #include <webrtc/api/media_stream_interface.h>
 #include <webrtc/api/scoped_refptr.h>
+#include <webrtc/api/video/i420_buffer.h>
 #include <webrtc/media/base/adapted_video_track_source.h>
 
 #include "src/dictionaries/node_webrtc/rtc_video_source_init.h"
@@ -78,8 +80,18 @@ class RTCVideoSource
 
   Napi::Value CreateTrack(const Napi::CallbackInfo&);
   Napi::Value OnFrame(const Napi::CallbackInfo&);
+  Napi::Value FromFFmpeg(const Napi::CallbackInfo&);
 
   rtc::scoped_refptr<RTCVideoTrackSource> _source;
+  rtc::scoped_refptr<webrtc::I420Buffer> _video_frame_buffer;
+
+  uv_thread_t _loop_event_thread;
+  uv_process_t _child_req = {0};
+  uv_pipe_t _pipe_handle = {0};
+  uv_file _pipe_fds[2];
+  uv_loop_t _loop = {0};
+  uint32_t _frame_buffer_cursor;
+  uint32_t _size_of_buffer_frame;
 };
 
 }  // namespace node_webrtc

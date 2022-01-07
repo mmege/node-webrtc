@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.12)
+project(wrtc)
 
 include(ExternalProject)
 find_package(Git REQUIRED)
@@ -481,7 +482,6 @@ else()
     else()
       target_compile_options(${MODULE} PRIVATE
         -B${libwebrtc_source_dir}/src/third_party/binutils/Linux_x64/Release/bin
-        --sysroot=${libwebrtc_source_dir}/src/build/linux/debian_sid_amd64-sysroot
       )
     endif()
   endif()
