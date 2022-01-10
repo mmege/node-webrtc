@@ -7,6 +7,19 @@ find_package(Threads REQUIRED)
 find_program(iwyu_path OPTIONAL NAMES include-what-you-use iwyu)
 find_program(clang_tidy_path OPTIONAL NAMES clang-tidy)
 
+
+find_path(AVCODEC_INCLUDE_DIR libavcodec/avcodec.h)
+find_library(AVCODEC_LIBRARY avcodec)
+
+find_path(AVFORMAT_INCLUDE_DIR libavformat/avformat.h)
+find_library(AVFORMAT_LIBRARY avformat)
+
+find_path(AVUTIL_INCLUDE_DIR libavutil/avutil.h)
+find_library(AVUTIL_LIBRARY avutil)
+
+find_path(AVDEVICE_INCLUDE_DIR libavdevice/avdevice.h)
+find_library(AVDEVICE_LIBRARY avdevice)
+
 # depot_tools
 # -----------------------------------------------------------------------------
 
@@ -368,6 +381,9 @@ if(WIN32)
     -DWEBRTC_WIN
   )
 else()
+  target_include_directories(${MODULE} PRIVATE ${AVCODEC_INCLUDE_DIR} ${AVFORMAT_INCLUDE_DIR} ${AVUTIL_INCLUDE_DIR} ${AVDEVICE_INCLUDE_DIR})
+  target_link_libraries(${MODULE} PRIVATE ${AVCODEC_LIBRARY} ${AVFORMAT_LIBRARY} ${AVUTIL_LIBRARY} ${AVDEVICE_LIBRARY})
+
   # NOTE(mroberts): Workaround for
   #
   #   https://gitlab.kitware.com/cmake/cmake/issues/15052

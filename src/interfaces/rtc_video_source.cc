@@ -21,6 +21,13 @@
 #include "src/functional/maybe.h"
 #include "src/interfaces/media_stream_track.h"
 
+extern "C" {
+#include <libavformat/avformat.h>
+#include <libavutil/imgutils.h>
+#include <libavutil/samplefmt.h>
+#include <libavutil/timestamp.h>
+}
+
 #include <chrono>
 #include <ctime>
 
@@ -102,8 +109,8 @@ namespace node_webrtc
     char *args[17];
     args[0] = "ffmpeg";
     args[1] = "-i";
-    //args[2] = "udp://@192.168.2.2:2222";
-    args[2] = "rtsp://192.168.3.142/z3-1.sdp";
+    args[2] = "udp://@192.168.3.74:2222";
+    //args[2] = "rtsp://192.168.3.142/z3-1.sdp";
     args[3] = "-f";
     args[4] = "rawvideo";
     args[5] = "-pix_fmt";
@@ -209,6 +216,154 @@ namespace node_webrtc
     return info.Env().Undefined();
   }
 
+  Napi::Value RTCVideoSource::FromLibAvFormat(const Napi::CallbackInfo &info){
+    uint32_t ret = 0;
+    static std::function<void(void *arg)> ReadFrameBufferBounce;
+    auto now = std::chrono::time_point_cast<std::chrono::microseconds>(std::chrono::system_clock::now());
+    char err_buff[64];
+
+    /* open input and allocate format context */
+    if (avformat_open_input(&fmt_ctx, "udp://@192.168.3.74:2222", NULL, NULL) < 0)
+    {
+      RTC_LOG(LS_ERROR) << "Could not open input";
+      return info.Env().Undefined();
+    }
+
+    /* retrieve stream information */
+    if (avformat_find_stream_info(fmt_ctx, NULL) < 0)
+    {
+      RTC_LOG(LS_ERROR) << "Could not find stream information";
+      return info.Env().Undefined();
+    }
+
+    video_stream_idx = av_find_best_stream(fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
+    if(video_stream_idx < 0)
+    {
+      RTC_LOG(LS_ERROR) << "Could not find " << av_get_media_type_string(AVMEDIA_TYPE_VIDEO) << " stream in input";
+      return info.Env().Undefined();
+    }
+
+    video_stream = fmt_ctx->streams[video_stream_idx];
+
+    /* find decoder for the stream */
+    const AVCodec *dec = avcodec_find_decoder(video_stream->codecpar->codec_id);
+    if (!dec)
+    {
+      RTC_LOG(LS_ERROR) << "Failed to find " << av_get_media_type_string(AVMEDIA_TYPE_VIDEO) << " codec";
+      return info.Env().Undefined();
+    }
+
+    /* Allocate a codec context for the decoder */
+    video_dec_ctx = avcodec_alloc_context3(dec);
+    if (!video_dec_ctx)
+    {
+      RTC_LOG(LS_ERROR) << "Failed to allocate the " << av_get_media_type_string(AVMEDIA_TYPE_VIDEO) << "codec context";
+      return info.Env().Undefined();
+    }
+
+    /* Copy codec parameters from input stream to output codec context */
+    if ((ret = avcodec_parameters_to_context(video_dec_ctx, video_stream->codecpar)) < 0)
+    {
+      RTC_LOG(LS_ERROR) << "Failed to copy" << av_get_media_type_string(AVMEDIA_TYPE_VIDEO) << "codec parameters to decoder context";
+      return info.Env().Undefined();
+    }
+
+    /* Init the decoders */
+    AVDictionary *opts = NULL;
+    if ((ret = avcodec_open2(video_dec_ctx, dec, &opts)) < 0)
+    {
+      RTC_LOG(LS_ERROR) << "Failed to open" << av_get_media_type_string(AVMEDIA_TYPE_VIDEO) << "codec";
+      return info.Env().Undefined();
+    }
+
+    /* allocate image where the decoded image will be put */
+    width = video_dec_ctx->width;
+    height = video_dec_ctx->height;
+    pix_fmt = video_dec_ctx->pix_fmt;
+    video_dst_bufsize = av_image_alloc(video_dst_data, video_dst_linesize,
+                         video_dec_ctx->width, video_dec_ctx->height, video_dec_ctx->pix_fmt, 1);
+    if (video_dst_bufsize < 0) {
+        RTC_LOG(LS_ERROR) << "Could not allocate raw video buffer";
+    }
+
+    ReadFrameBufferBounce = [&](void *arg)
+    {
+      AVFrame *frame = av_frame_alloc();
+      if (!frame)
+      {
+        RTC_LOG(LS_ERROR) << "Could not allocate frame";
+        return;
+      }
+
+      /* initialize packet, set data to NULL, let the demuxer fill it */
+      AVPacket pkt;
+      av_init_packet(&pkt);
+      pkt.data = NULL;
+      pkt.size = 0;
+
+      /* read frames from the source url*/
+      while (av_read_frame(fmt_ctx, &pkt) >= 0)
+      {
+        /* Submit packet to decoder*/
+        int ret = avcodec_send_packet(video_dec_ctx, &pkt);
+        if (ret < 0) {
+          av_make_error_string(err_buff, 64, ret);
+          RTC_LOG(LS_ERROR) << "Error submitting a packet for decoding" << err_buff;
+          break;
+        }
+
+        /* Decode Frame (One per each pkt with VIDEO case)*/
+        ret = avcodec_receive_frame(video_dec_ctx, frame);
+        if (ret < 0) {
+          // those two return values are special and mean there is no output
+          // frame available, but there were no errors during decoding
+          if (ret == AVERROR_EOF || ret == AVERROR(EAGAIN))
+            continue;
+          av_make_error_string(err_buff, 64, ret);
+          RTC_LOG(LS_ERROR) << "Error during decoding" << err_buff;
+          break;
+        }
+
+        /* Create the WebRTC image buffer */
+        rtc::scoped_refptr<webrtc::I420Buffer> video_frame_buffer = webrtc::I420Buffer::Create(frame->width, frame->height);
+        int w = video_frame_buffer->width();
+        int h = video_frame_buffer->height();
+        uint8_t *dst = video_frame_buffer->MutableDataY();
+
+        /* copy decoded frame to destination buffer:
+         * this is required since rawvideo expects non aligned data */
+        ret = av_image_copy_to_buffer(video_frame_buffer->MutableDataY(), video_dst_bufsize,
+                                (const uint8_t **)(frame->data), frame->linesize,
+                                pix_fmt, width, height, 1);
+        if(ret < 0){
+          av_make_error_string(err_buff, 64, ret);
+          RTC_LOG(LS_ERROR) << "Error during decoding" << err_buff;
+        }
+        if(ret != video_dst_bufsize)
+        {
+          RTC_LOG(LS_ERROR) << "Copy of frame size does not correspond to attended frame size";
+        }
+
+        webrtc::VideoFrame::Builder webRTCFramebuilder;
+        auto webRTCframe = webRTCFramebuilder
+                         .set_timestamp_us(now.time_since_epoch().count())
+                         .set_video_frame_buffer(video_frame_buffer)
+                         .build();
+        _source->PushFrame(webRTCframe);
+
+        av_frame_unref(frame);
+        av_packet_unref(&pkt);
+      }
+    };
+
+    uv_thread_create(
+        &_decode_thread, [](void *arg)
+        { ReadFrameBufferBounce(arg); },
+        NULL);
+
+    return info.Env().Undefined();
+  }
+
   Napi::Value RTCVideoSource::OnFrame(const Napi::CallbackInfo &info)
   {
     CONVERT_ARGS_OR_THROW_AND_RETURN_NAPI(info, buffer, rtc::scoped_refptr<webrtc::I420Buffer>)
@@ -241,7 +396,7 @@ namespace node_webrtc
   {
     Napi::HandleScope scope(env);
 
-    Napi::Function func = DefineClass(env, "RTCVideoSource", {InstanceMethod("createTrack", &RTCVideoSource::CreateTrack), InstanceMethod("onFrame", &RTCVideoSource::OnFrame), InstanceMethod("fromFFmpeg", &RTCVideoSource::FromFFmpeg), InstanceAccessor("needsDenoising", &RTCVideoSource::GetNeedsDenoising, nullptr), InstanceAccessor("isScreencast", &RTCVideoSource::GetIsScreencast, nullptr)});
+    Napi::Function func = DefineClass(env, "RTCVideoSource", {InstanceMethod("createTrack", &RTCVideoSource::CreateTrack), InstanceMethod("onFrame", &RTCVideoSource::OnFrame), InstanceMethod("fromFFmpeg", &RTCVideoSource::FromFFmpeg), InstanceMethod("fromLibAvFormat", &RTCVideoSource::FromLibAvFormat), InstanceAccessor("needsDenoising", &RTCVideoSource::GetNeedsDenoising, nullptr), InstanceAccessor("isScreencast", &RTCVideoSource::GetIsScreencast, nullptr)});
 
     constructor() = Napi::Persistent(func);
     constructor().SuppressDestruct();

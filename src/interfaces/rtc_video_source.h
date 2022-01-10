@@ -17,6 +17,11 @@
 #include <webrtc/api/video/i420_buffer.h>
 #include <webrtc/media/base/adapted_video_track_source.h>
 
+extern "C" {
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
+}
+
 #include "src/dictionaries/node_webrtc/rtc_video_source_init.h"
 #include "src/interfaces/rtc_peer_connection/peer_connection_factory.h"
 
@@ -81,6 +86,7 @@ class RTCVideoSource
   Napi::Value CreateTrack(const Napi::CallbackInfo&);
   Napi::Value OnFrame(const Napi::CallbackInfo&);
   Napi::Value FromFFmpeg(const Napi::CallbackInfo&);
+  Napi::Value FromLibAvFormat(const Napi::CallbackInfo&);
 
   rtc::scoped_refptr<RTCVideoTrackSource> _source;
   rtc::scoped_refptr<webrtc::I420Buffer> _video_frame_buffer;
@@ -92,6 +98,19 @@ class RTCVideoSource
   uv_loop_t _loop = {0};
   uint32_t _frame_buffer_cursor;
   uint32_t _size_of_buffer_frame;
+
+  uv_thread_t _decode_thread;
+  AVFormatContext *fmt_ctx = NULL;
+  AVCodecContext *video_dec_ctx = NULL;
+  int width, height;
+  enum AVPixelFormat pix_fmt;
+  int video_stream_idx = -1;
+  AVStream *video_stream = NULL;
+  const char *url_src = NULL;
+
+  uint8_t *video_dst_data[4] = {NULL};
+  int      video_dst_linesize[4];
+  int video_dst_bufsize;
 };
 
 }  // namespace node_webrtc
