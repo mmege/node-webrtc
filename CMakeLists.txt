@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.12)
-project(wrtc)
+project(wrtc C CXX CUDA)
 
 include(ExternalProject)
 find_package(Git REQUIRED)
 find_package(Threads REQUIRED)
+find_package(CUDA REQUIRED)
 find_program(iwyu_path OPTIONAL NAMES include-what-you-use iwyu)
 find_program(clang_tidy_path OPTIONAL NAMES clang-tidy)
-
 
 find_path(AVCODEC_INCLUDE_DIR libavcodec/avcodec.h)
 find_library(AVCODEC_LIBRARY avcodec)
@@ -382,7 +382,7 @@ if(WIN32)
   )
 else()
   target_include_directories(${MODULE} PRIVATE ${AVCODEC_INCLUDE_DIR} ${AVFORMAT_INCLUDE_DIR} ${AVUTIL_INCLUDE_DIR} ${AVDEVICE_INCLUDE_DIR})
-  target_link_libraries(${MODULE} PRIVATE ${AVCODEC_LIBRARY} ${AVFORMAT_LIBRARY} ${AVUTIL_LIBRARY} ${AVDEVICE_LIBRARY})
+  target_link_libraries(${MODULE} PRIVATE ${AVCODEC_LIBRARY} ${AVFORMAT_LIBRARY} ${AVUTIL_LIBRARY} ${AVDEVICE_LIBRARY} ${CUDA_npp_LIBRARY} ${CUDA_RUNTIME_LIBRARY} ${CUDA_LIBRARIES})
 
   # NOTE(mroberts): Workaround for
   #

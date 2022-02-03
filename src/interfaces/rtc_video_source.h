@@ -111,6 +111,7 @@ class RTCVideoSource
 
   AVBufferRef* hw_device_ctx = NULL;
   enum AVPixelFormat hw_pix_fmt;
+  AVHWFramesContext *hw_frames_ctx;
 };
 
 }  // namespace node_webrtc

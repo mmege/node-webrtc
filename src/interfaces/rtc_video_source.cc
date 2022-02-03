@@ -7,6 +7,9 @@
  */
 #include "src/interfaces/rtc_video_source.h"
 
+#include <npp.h>
+#include <nppi_color_conversion.h>
+
 #include <webrtc/api/peer_connection_interface.h>
 #include <webrtc/api/video/i420_buffer.h>
 #include <webrtc/api/video/video_frame.h>
@@ -293,6 +296,27 @@ Napi::Value RTCVideoSource::FromLibAvFormat(const Napi::CallbackInfo& info) {
   }
   video_dec_ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
 
+  video_dec_ctx->hw_frames_ctx = av_hwframe_ctx_alloc(video_dec_ctx->hw_device_ctx);
+  if (!video_dec_ctx->hw_frames_ctx)
+  {
+    av_make_error_string(err_buff, 64, ret);
+    RTC_LOG(LS_ERROR) << "Failed to create specified HW Frame context:" << err_buff;
+    return info.Env().Undefined();
+  }
+
+  hw_frames_ctx = (AVHWFramesContext*)video_dec_ctx->hw_frames_ctx->data;
+  hw_frames_ctx->format            = AV_PIX_FMT_CUDA;
+  hw_frames_ctx->sw_format         = AV_PIX_FMT_NV12;
+  hw_frames_ctx->width             = FFALIGN(video_dec_ctx->width, 128);
+  hw_frames_ctx->height            = FFALIGN(video_dec_ctx->height, 128);
+
+  ret = av_hwframe_ctx_init(video_dec_ctx->hw_frames_ctx);
+  if (ret < 0) {
+    av_make_error_string(err_buff, 64, ret);
+    RTC_LOG(LS_ERROR) << "Failed to apply HW Frame context:" << err_buff;
+    return info.Env().Undefined();
+  }
+
   /* Init the decoders */
   AVDictionary* opts = NULL;
   ret = avcodec_open2(video_dec_ctx, decoder, &opts);
@@ -304,18 +328,14 @@ Napi::Value RTCVideoSource::FromLibAvFormat(const Napi::CallbackInfo& info) {
   ReadFrameBufferBounce = [&](void* arg) {
     AVFrame* frame = av_frame_alloc();
     AVFrame* swFrame = av_frame_alloc();
+    webrtc::VideoFrame::Builder webRTCFramebuilder;
+
     if (!frame || !swFrame) {
       RTC_LOG(LS_ERROR) << "Could not allocate frame";
       return;
     }
 
-    int video_dst_bufsize = av_image_get_buffer_size(video_dec_ctx->pix_fmt, video_dec_ctx->width,
-                                                 video_dec_ctx->height, 1);
-    if (video_dst_bufsize < 0)
-    {
-      av_make_error_string(err_buff, 64, video_dst_bufsize);
-      RTC_LOG(LS_ERROR) << "Error computing frame buff size: " << err_buff;
-    }
+    swFrame->format = AV_PIX_FMT_YUV420P;
 
     /* initialize packet, set data to NULL, let the demuxer fill it */
     AVPacket pkt;
@@ -349,30 +369,21 @@ Napi::Value RTCVideoSource::FromLibAvFormat(const Napi::CallbackInfo& info) {
         break;
       }
 
-      /* Retrieve data from GPU to CPU */
-      swFrame->format = AV_PIX_FMT_YUV420P;
+      /* Create the WebRTC image buffer */
+      rtc::scoped_refptr<webrtc::I420Buffer> video_frame_buffer = webrtc::I420Buffer::Create(frame->width, frame->height);
+
+      swFrame->linesize[0] = frame->width;
+      swFrame->linesize[1] = swFrame->linesize[0] / 2;
+      swFrame->linesize[2] = swFrame->linesize[1];
+      swFrame->data[0] = video_frame_buffer->MutableDataY();
+      swFrame->data[1] = video_frame_buffer->MutableDataU();
+      swFrame->data[2] = video_frame_buffer->MutableDataV();
+
       if ((ret = av_hwframe_transfer_data(swFrame, frame, 0)) < 0)
       {
         RTC_LOG(LS_ERROR) << "Error transferring the data to system memory";
         break;
       }
-
-      /* Create the WebRTC image buffer */
-      rtc::scoped_refptr<webrtc::I420Buffer> video_frame_buffer = webrtc::I420Buffer::Create(swFrame->width, swFrame->height);
-
-      /* copy decoded frame to destination buffer:*/
-      ret = av_image_copy_to_buffer(video_frame_buffer->MutableDataY(), video_dst_bufsize,
-              swFrame->data, swFrame->linesize,
-              static_cast<AVPixelFormat>(swFrame->format), swFrame->width, swFrame->height, 1);
-      if (ret < 0) {
-        av_make_error_string(err_buff, 64, ret);
-        RTC_LOG(LS_ERROR) << "Error during decoding" << err_buff;
-      }
-      if (ret != video_dst_bufsize) {
-        RTC_LOG(LS_ERROR) << "Copy of frame size does not correspond to attended frame size";
-      }
-
-      webrtc::VideoFrame::Builder webRTCFramebuilder;
       auto now = std::chrono::time_point_cast<std::chrono::microseconds>(std::chrono::system_clock::now());
       auto webRTCframe = webRTCFramebuilder
           .set_timestamp_us(now.time_since_epoch().count())
@@ -383,6 +394,10 @@ Napi::Value RTCVideoSource::FromLibAvFormat(const Napi::CallbackInfo& info) {
       av_frame_unref(frame);
       av_packet_unref(&pkt);
     }
+    av_frame_unref(frame);
+    av_frame_unref(swFrame);
+    av_frame_free(&frame);
+    av_frame_free(&swFrame);
   };
 
   uv_thread_create(
