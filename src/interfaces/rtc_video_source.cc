@@ -7,9 +7,6 @@
  */
 #include "src/interfaces/rtc_video_source.h"
 
-#include <npp.h>
-#include <nppi_color_conversion.h>
-
 #include <webrtc/api/peer_connection_interface.h>
 #include <webrtc/api/video/i420_buffer.h>
 #include <webrtc/api/video/video_frame.h>
@@ -35,6 +32,7 @@ extern "C" {
 
 #include <chrono>
 #include <ctime>
+
 
 namespace node_webrtc {
 
@@ -408,6 +406,100 @@ Napi::Value RTCVideoSource::FromLibAvFormat(const Napi::CallbackInfo& info) {
   return info.Env().Undefined();
 }
 
+Napi::Value RTCVideoSource::FromUeye(const Napi::CallbackInfo& info){
+
+  static std::function<void(void* arg)> ReadUeyeFrame;
+  width = 1280;
+  height = 720;
+
+  lineSize[0] = width;
+  lineSize[1] = lineSize[0] / 2;
+  lineSize[2] = lineSize[1];
+
+  //Open camera with ID 1
+  INT nRet = is_InitCamera (&hCam, NULL);
+  if (nRet != IS_SUCCESS)
+  {
+    RTC_LOG(LS_ERROR) << "Failed to init camera";
+    return info.Env().Undefined();
+  }
+  // Load parameters from specified file using a relative path
+  nRet = is_ParameterSet(hCam, IS_PARAMETERSET_CMD_LOAD_FILE, (void *)L"/home/mathieu/Documents/ueye_camera_parameters.ini", NULL);
+
+  nRet = is_SetColorMode(hCam, IS_CM_RGB8_PACKED);
+  nRet = is_SetDisplayMode(hCam, IS_SET_DM_DIB);
+
+  cudaStream = nppGetStream();
+  cuStatus = nppGetStreamContext(&NppStreamContext);
+
+  RGBCudaPackedBuffer = nppiMalloc_8u_C3(width, height, &RGBStepBytes);
+  for (unsigned int i = 0; i < 3; i++)
+  {
+    YUV420CudaPlannarBuffer[i] = nppiMalloc_8u_C1(lineSize[i], (i == 0?height:height/2), &YUV420StepBytes[i]);
+  }
+
+  nRet = is_AllocImageMem (hCam, width, height, 24, &imageMem, &memID);
+  nRet = is_SetImageMem (hCam, imageMem, memID);
+  nRet = is_GetImageMemPitch (hCam, &userSpaceRGBPitch);
+
+  ReadUeyeFrame = [&](void* arg)
+  {
+    INT nRet;
+    nRet = is_CaptureVideo(hCam, IS_DONT_WAIT);
+    while(true){
+      cuErr = cudaMemcpy2DAsync(RGBCudaPackedBuffer,
+                        RGBStepBytes,
+                        imageMem,
+                        userSpaceRGBPitch,
+                        width * 3,
+                        height,
+                        cudaMemcpyHostToDevice,
+                        cudaStream);
+
+      cuStatus = nppiRGBToYUV420_8u_C3P3R_Ctx(RGBCudaPackedBuffer,
+                                             RGBStepBytes,
+                                             YUV420CudaPlannarBuffer,
+                                             YUV420StepBytes,
+                                             NppiSize{width, height},
+                                             NppStreamContext);
+
+      rtc::scoped_refptr<webrtc::I420Buffer>
+          video_frame_buffer = webrtc::I420Buffer::Create(width, height);
+      bufferFrameI420[0] = video_frame_buffer->MutableDataY();
+      bufferFrameI420[1] = video_frame_buffer->MutableDataU();
+      bufferFrameI420[2] = video_frame_buffer->MutableDataV();
+
+      for (unsigned int i = 0; i < 3; i++)
+      {
+        cuErr = cudaMemcpy2DAsync(bufferFrameI420[i],
+                          lineSize[i],
+                          YUV420CudaPlannarBuffer[i],
+                          YUV420StepBytes[i],
+                          lineSize[i],
+                          (i == 0?height:height/2),
+                          cudaMemcpyDeviceToHost,
+                          cudaStream);
+      }
+      cuErr = cudaStreamSynchronize(cudaStream);
+
+      auto now = std::chrono::time_point_cast<std::chrono::microseconds>(std::chrono::system_clock::now());
+      uint64_t nowInUs = now.time_since_epoch().count();
+
+      webrtc::VideoFrame::Builder builder;
+      auto frame = builder
+                       .set_timestamp_us(nowInUs)
+                       .set_video_frame_buffer(video_frame_buffer)
+                       .build();
+      _source->PushFrame(frame);
+    }
+  };
+  uv_thread_create(
+      &_decode_thread, [](void *arg)
+      { ReadUeyeFrame(arg); }, NULL);
+
+  return info.Env().Undefined();
+}
+
 Napi::Value RTCVideoSource::OnFrame(const Napi::CallbackInfo& info) {
   CONVERT_ARGS_OR_THROW_AND_RETURN_NAPI(info, buffer, rtc::scoped_refptr<webrtc::I420Buffer>)
 
@@ -436,7 +528,7 @@ Napi::Value RTCVideoSource::GetIsScreencast(const Napi::CallbackInfo& info) {
 void RTCVideoSource::Init(Napi::Env env, Napi::Object exports) {
   Napi::HandleScope scope(env);
 
-  Napi::Function func = DefineClass(env, "RTCVideoSource", {InstanceMethod("createTrack", &RTCVideoSource::CreateTrack), InstanceMethod("onFrame", &RTCVideoSource::OnFrame), InstanceMethod("fromFFmpeg", &RTCVideoSource::FromFFmpeg), InstanceMethod("fromLibAvFormat", &RTCVideoSource::FromLibAvFormat), InstanceAccessor("needsDenoising", &RTCVideoSource::GetNeedsDenoising, nullptr), InstanceAccessor("isScreencast", &RTCVideoSource::GetIsScreencast, nullptr)});
+  Napi::Function func = DefineClass(env, "RTCVideoSource", {InstanceMethod("createTrack", &RTCVideoSource::CreateTrack), InstanceMethod("onFrame", &RTCVideoSource::OnFrame), InstanceMethod("fromFFmpeg", &RTCVideoSource::FromFFmpeg), InstanceMethod("fromLibAvFormat", &RTCVideoSource::FromLibAvFormat), InstanceMethod("fromeUeye", &RTCVideoSource::FromUeye), InstanceAccessor("needsDenoising", &RTCVideoSource::GetNeedsDenoising, nullptr), InstanceAccessor("isScreencast", &RTCVideoSource::GetIsScreencast, nullptr)});
 
   constructor() = Napi::Persistent(func);
   constructor().SuppressDestruct();

@@ -9,6 +9,11 @@
 
 #include <memory>
 #include <uv.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <npp.h>
+#include <nppi_color_conversion.h>
+#include <ueye.h>
 
 #include <absl/types/optional.h>
 #include <node-addon-api/napi.h>
@@ -88,6 +93,7 @@ class RTCVideoSource
   Napi::Value OnFrame(const Napi::CallbackInfo&);
   Napi::Value FromFFmpeg(const Napi::CallbackInfo&);
   Napi::Value FromLibAvFormat(const Napi::CallbackInfo&);
+  Napi::Value FromUeye(const Napi::CallbackInfo&);
 
   rtc::scoped_refptr<RTCVideoTrackSource> _source;
   rtc::scoped_refptr<webrtc::I420Buffer> _video_frame_buffer;
@@ -112,6 +118,21 @@ class RTCVideoSource
   AVBufferRef* hw_device_ctx = NULL;
   enum AVPixelFormat hw_pix_fmt;
   AVHWFramesContext *hw_frames_ctx;
+
+  cudaStream_t cudaStream;
+  int RGBStepBytes;
+  int YUV420StepBytes[3];
+  Npp8u *RGBCudaPackedBuffer;
+  Npp8u *YUV420CudaPlannarBuffer[3];
+  NppStreamContext NppStreamContext = {0};
+  uint8_t *bufferFrameI420[3];
+  int lineSize[3];
+  char *imageMem;
+  int memID;
+  cudaError_t cuErr;
+  NppStatus cuStatus;
+  HIDS hCam = 1;
+  INT userSpaceRGBPitch;
 };
 
 }  // namespace node_webrtc
